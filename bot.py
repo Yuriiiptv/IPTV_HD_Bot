@@ -1,83 +1,101 @@
 import asyncio
 import aiohttp
-import logging
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InputFile
-from aiogram.utils import executor
-from config import BOT_TOKEN, CHANNEL_NAMES, M3U_URLS
+from aiogram.filters import Command
+from aiogram.types import BufferedInputFile
+import config
 
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+async def start_handler(message: types.Message):
+    """
+    Обработчик команды /start.
+    Отправляет приветственное сообщение.
+    """
+    await message.answer("Привет! Используй команду /получить_плейлист для генерации плейлиста.")
 
-async def fetch_m3u(session, url):
-    try:
-        async with session.get(url, timeout=10) as response:
-            if response.status == 200:
-                return await response.text()
-    except Exception as e:
-        logging.warning(f"Failed to fetch {url}: {e}")
-    return ''
+async def get_playlist_handler(message: types.Message):
+    """
+    Обработчик команды /получить_плейлист:
+    Загружает плейлисты, фильтрует каналы, проверяет ссылки и отправляет новый M3U-файл.
+    """
+    await message.answer("Начинаем обработку плейлистов...")
+    # Делаем список названий каналов в нижнем регистре для сравнения
+    channel_names = [name.lower() for name in config.CHANNEL_NAMES]
 
-def parse_m3u(content):
-    lines = content.splitlines()
-    channels = []
-    for i in range(len(lines)):
-        if lines[i].startswith('#EXTINF'):
-            if i + 1 < len(lines):
-                channels.append((lines[i], lines[i + 1]))
-    return channels
-
-def filter_channels(channels, names):
-    filtered = []
-    for extinf, url in channels:
-        for name in names:
-            if name.lower() in extinf.lower():
-                filtered.append((extinf, url))
-                break
-    return filtered
-
-async def check_url(session, url):
-    try:
-        async with session.head(url, timeout=5) as response:
-            return response.status == 200
-    except:
-        return False
-
-async def validate_channels(channels):
-    valid = []
     async with aiohttp.ClientSession() as session:
-        tasks = []
-        for extinf, url in channels:
-            tasks.append(check_url(session, url))
+        # Асинхронно загружаем все плейлисты
+        playlist_texts = []
+        async def fetch_playlist(url):
+            try:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        return await resp.text()
+            except Exception:
+                return None
+
+        tasks = [asyncio.create_task(fetch_playlist(url)) for url in config.M3U_URLS]
         results = await asyncio.gather(*tasks)
-        for i, result in enumerate(results):
-            if result:
-                valid.append(channels[i])
-    return valid
+        # Собираем тексты плейлистов (игнорируем неудачные запросы)
+        for text in results:
+            if text:
+                playlist_texts.append(text)
 
-@dp.message_handler(commands=['start'])
-async def start(message: types.Message):
-    await message.reply("Привет! Отправь команду /получить_плейлист, чтобы получить актуальный плейлист.")
+        # Парсим плейлисты и фильтруем каналы по названиям
+        filtered_channels = []
+        for text in playlist_texts:
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            it = iter(lines)
+            first = next(it, "")
+            if first.startswith("#EXTM3U"):
+                pass  # пропустить заголовок
+            else:
+                # если файл без заголовка, вернуться к началу
+                it = iter(lines)
+            for line in it:
+                if line.startswith("#EXTINF"):
+                    parts = line.split(",", 1)
+                    title = parts[1].strip() if len(parts) > 1 else ""
+                    url = next(it, "").strip()  # следующий URL-стрим
+                    if title and url and title.lower() in channel_names:
+                        filtered_channels.append((title, url))
 
-@dp.message_handler(commands=['получить_плейлист'])
-async def get_playlist(message: types.Message):
-    await message.reply("Собираю плейлист, подождите...")
-    async with aiohttp.ClientSession() as session:
-        tasks = [fetch_m3u(session, url) for url in M3U_URLS]
-        contents = await asyncio.gather(*tasks)
-    all_channels = []
-    for content in contents:
-        all_channels.extend(parse_m3u(content))
-    filtered = filter_channels(all_channels, CHANNEL_NAMES)
-    valid = await validate_channels(filtered)
-    if not valid:
-        await message.reply("Не удалось найти рабочие каналы.")
+        if not filtered_channels:
+            await message.reply("Не найдены каналы с указанными именами.")
+            return
+
+        # Проверяем статус ссылок асинхронно
+        valid_channels = []
+        async def check_url(title, url):
+            try:
+                async with session.get(url) as resp:
+                    return resp.status == 200
+            except Exception:
+                return False
+
+        tasks = [asyncio.create_task(check_url(title, url)) for title, url in filtered_channels]
+        statuses = await asyncio.gather(*tasks)
+        for (title, url), ok in zip(filtered_channels, statuses):
+            if ok:
+                valid_channels.append((title, url))
+
+    if not valid_channels:
+        await message.reply("Не удалось получить рабочие ссылки для указанных каналов.")
         return
-    playlist = '#EXTM3U\n' + '\n'.join([f"{extinf}\n{url}" for extinf, url in valid])
-    with open('playlist.m3u', 'w', encoding='utf-8') as f:
-        f.write(playlist)
-    await message.reply_document(InputFile('playlist.m3u'))
 
-if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+    # Генерируем содержимое нового M3U-файла
+    content = "#EXTM3U\n"
+    for title, url in valid_channels:
+        content += f"#EXTINF:-1,{title}\n{url}\n"
+
+    # Отправляем файл пользователю
+    m3u_file = BufferedInputFile(content.encode('utf-8'), filename="filtered_playlist.m3u")
+    await message.reply_document(m3u_file, caption="Сформирован фильтрованный плейлист.")
+
+async def main():
+    bot = Bot(token=config.BOT_TOKEN)
+    dp = Dispatcher()
+    dp.message.register(start_handler, Command("start"))
+    dp.message.register(get_playlist_handler, Command("получить_плейлист"))
+    await dp.start_polling(bot)
+
+if name == 'main':
+    asyncio.run(main())
