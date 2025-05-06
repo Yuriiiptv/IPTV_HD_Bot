@@ -16,34 +16,44 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
-# Обработчики команд
-@dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    logger.info(f"Получен /start от {message.from_user.id}")
-    await message.answer("Бот активен! Используйте /playlist.")
-
-@dp.message(Command("playlist"))
-async def playlist_handler(message: types.Message):
-    # Ваш код обработки плейлиста
-    pass
-
 # Веб-сервер для Render
-async def web_handler(request):
-    return web.Response(text="OK")
+async def health_check(request):
+    return web.Response(text="Bot is working!")
 
-async def main():
-    # Настройка веб-сервера
+async def start_web_server():
+    """Явная настройка веб-сервера с логированием порта"""
     app = web.Application()
-    app.add_routes([web.get("/", web_handler)])
+    app.add_routes([web.get("/", health_check)])
+    
     runner = web.AppRunner(app)
     await runner.setup()
     
     port = int(os.environ.get("PORT", 5000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
+    logger.info(f"🔄 Web server starting on port {port}")  # Логирование порта
     
-    # Запуск бота
-    await dp.start_polling(bot)
+    try:
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        logger.info("✅ Web server started successfully")
+        return runner
+    except Exception as e:
+        logger.error(f"❌ Web server failed: {str(e)}")
+        raise
+
+async def main():
+    try:
+        # Запуск веб-сервера
+        web_runner = await start_web_server()
+        
+        # Запуск бота
+        logger.info("🤖 Starting bot...")
+        await dp.start_polling(bot)
+        
+    except Exception as e:
+        logger.critical(f"🔥 Critical error: {str(e)}")
+    finally:
+        if web_runner:
+            await web_runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())
