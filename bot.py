@@ -5,17 +5,18 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 from aiohttp import web
-import config  # Импортируем конфиг
+import config
 
 # Инициализация бота и диспетчера
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
-# Обработчики команд
+# Обработчик команды /start
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    await message.answer("Привет! Используй /получить_плейлист")
+    await message.answer("Привет! Используй /получить_плейлист для генерации плейлиста.")
 
+# Обработчик команды /получить_плейлист
 @dp.message(Command("получить_плейлист"))
 async def get_playlist_handler(message: types.Message):
     await message.answer("Обрабатываю плейлисты...")
@@ -89,14 +90,10 @@ async def get_playlist_handler(message: types.Message):
 async def web_handler(request):
     return web.Response(text="OK")
 
-async def start_app():
-    app = web.Application()
-    app.add_routes([web.get("/", web_handler)])
-    return app
-
 async def main():
     # Запуск веб-сервера
-    app = await start_app()
+    app = web.Application()
+    app.add_routes([web.get("/", web_handler)])
     runner = web.AppRunner(app)
     await runner.setup()
     
