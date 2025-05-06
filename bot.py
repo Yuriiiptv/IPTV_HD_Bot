@@ -5,20 +5,19 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 from aiohttp import web
+import config  # Импортируем конфиг
 
-# Подключаем конфиг (файл config.py должен быть в той же папке)
-import config
+# Инициализация бота и диспетчера
+bot = Bot(token=config.BOT_TOKEN)
+dp = Dispatcher()
 
-# ----------------------------
-# 1. Основные обработчики бота
-# ----------------------------
-
+# Обработчики команд
+@dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    """Обработчик команды /start"""
-    await message.answer("Привет! Используй /получить_плейлист для генерации плейлиста.")
+    await message.answer("Привет! Используй /получить_плейлист")
 
+@dp.message(Command("получить_плейлист"))
 async def get_playlist_handler(message: types.Message):
-    """Обработчик команды /получить_плейлист"""
     await message.answer("Обрабатываю плейлисты...")
     
     channel_names = [name.lower() for name in config.CHANNEL_NAMES]
@@ -86,41 +85,26 @@ async def get_playlist_handler(message: types.Message):
     m3u_file = BufferedInputFile(content.encode("utf-8"), filename="playlist.m3u")
     await message.reply_document(m3u_file, caption="Ваш плейлист готов!")
 
-# ----------------------------
-# 2. Веб-сервер для Render
-# ----------------------------
+# Веб-сервер для Render
+async def web_handler(request):
+    return web.Response(text="OK")
 
-async def web_server():
-    """Минимальный HTTP-сервер для обработки проверок UptimeBot"""
+async def start_app():
     app = web.Application()
-    
-    async def health_check(request):
-        return web.Response(text="OK")
-    
-    app.add_routes([web.get("/", health_check)])
+    app.add_routes([web.get("/", web_handler)])
     return app
 
-# ----------------------------
-# 3. Запуск приложения
-# ----------------------------
-
 async def main():
-    # Инициализация бота
-    bot = Bot(token=config.BOT_TOKEN)
-    dp = Dispatcher()
-    
-    # Регистрация команд
-    dp.message.register(start_handler, Command("start"))
-    dp.message.register(get_playlist_handler, Command("получить_плейлист"))
-
-    # Запуск веб-сервера и бота
-    runner = web.AppRunner(await web_server())
+    # Запуск веб-сервера
+    app = await start_app()
+    runner = web.AppRunner(app)
     await runner.setup()
     
     port = int(os.environ.get("PORT", 5000))
     site = web.TCPSite(runner, "0.0.0.0", port)
-    
     await site.start()
+    
+    # Запуск бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
