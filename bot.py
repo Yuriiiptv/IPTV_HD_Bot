@@ -1,164 +1,88 @@
+# bot.py
 import os
-import asyncio
-import logging
-import aiohttp
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.enums import ParseMode
-from aiohttp import web
+import telebot
+import requests
+from dotenv import load_dotenv
 import config
 
-# Настройка логов
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+load_dotenv()
+TOKEN = os.getenv('TELEGRAM_TOKEN')
 
-# Инициализация бота
-bot = Bot(token=config.BOT_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher()
+if not TOKEN:
+    print("Ошибка: TELEGRAM_TOKEN должен быть указан в .env")
+    exit(1)
 
-# Клавиатура с инлайн-кнопками
-def get_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📺 Получить плейлист", callback_data="get_playlist")]
-    ])
-    return keyboard
+bot = telebot.TeleBot(TOKEN)
 
-# Обработчик команды /start
-@dp.message(Command("start"))
-async def start_command(message: types.Message):
-    await message.answer(
-        "Привет! Я могу собрать плейлист из популярных каналов.\n"
-        "Нажми кнопку ниже, чтобы получить актуальный список:",
-        reply_markup=get_keyboard()
-    )
+@bot.message_handler(commands=['start'])
+def start_handler(message):
+    bot.reply_to(message, "Привет! Отправь /getplaylist, чтобы получить обновлённый IPTV-плейлист.")
 
-# Обработчик инлайн-кнопки
-@dp.callback_query(lambda c: c.data == "get_playlist")
-async def process_playlist(callback: types.CallbackQuery):
-    try:
-        await callback.message.edit_text("⏳ Загружаю и проверяю плейлисты...")
-        
-        user_ip = await get_user_ip(callback.from_user.id)
-        if not user_ip:
-            await callback.message.edit_text("❌ Не удалось определить ваш IP для проверки")
-            return
+@bot.message_handler(commands=['getplaylist'])
+def get_playlist_handler(message):
+    chat_id = message.chat.id
+    bot.send_message(chat_id, "Собираю список доступных каналов. Подождите...")
+    working_entries = []
 
-        valid_channels = await check_channels(user_ip)
-        
-        if not valid_channels:
-            await callback.message.edit_text("❌ Не удалось найти рабочие каналы")
-            return
+    for playlist_url in config.PLAYLIST_URLS:
+        try:
+            res = requests.get(playlist_url, timeout=10)
+        except requests.RequestException as e:
+            print(f"Ошибка при скачивании {playlist_url}: {e}")
+            continue
+        if res.status_code != 200:
+            print(f"{playlist_url} вернул статус {res.status_code}")
+            continue
 
-        # Формирование M3U с учетом IP пользователя
-        m3u_content = "#EXTM3U\n"
-        for title, url in valid_channels:
-            m3u_content += f"#EXTINF:-1,{title}\n{url}\n"
-
-        file = BufferedInputFile(
-            m3u_content.encode("utf-8"),
-            filename="personal_playlist.m3u"
-        )
-        
-        await callback.message.answer_document(
-            file,
-            caption=f"✅ Ваш персональный плейлист ({len(valid_channels)} каналов)\n"
-                   f"Проверено с вашего IP: {user_ip}"
-        )
-        await callback.answer()
-
-    except Exception as e:
-        logger.error(f"Ошибка: {str(e)}")
-        await callback.message.edit_text("⚠️ Произошла ошибка. Попробуйте позже.")
-        await callback.answer()
-
-async def get_user_ip(user_id: int) -> str:
-    """Получаем примерный IP пользователя через внешний сервис"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get('https://api.ipify.org?format=json') as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get('ip', '')
-    except Exception as e:
-        logger.error(f"Ошибка получения IP: {str(e)}")
-    return ""
-
-async def check_channels(user_ip: str) -> list:
-    """Проверка каналов с учетом IP пользователя"""
-    valid_channels = []
-    target_channels = [name.lower() for name in config.CHANNEL_NAMES]
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Заголовки с IP пользователя (для некоторых прокси)
-            headers = {'X-Forwarded-For': user_ip, 'X-Real-IP': user_ip}
-            
-            # Загрузка плейлистов
-            playlists = []
-            for url in config.M3U_URLS:
-                try:
-                    async with session.get(url, timeout=15, headers=headers) as resp:
-                        if resp.status == 200:
-                            playlists.append(await resp.text())
-                except Exception as e:
-                    logger.error(f"Ошибка загрузки {url}: {str(e)}")
-
-            # Парсинг и проверка каналов
-            for playlist in playlists:
-                lines = playlist.splitlines()
-                channel_info = {}
-                
-                for line in lines:
-                    line = line.strip()
-                    if line.startswith("#EXTINF"):
-                        parts = line.split(",", 1)
-                        if len(parts) > 1:
-                            channel_info["title"] = parts[1].strip()
-                    elif line and not line.startswith("#"):
-                        channel_info["url"] = line
-                        if "title" in channel_info:
-                            title_lower = channel_info["title"].lower()
-                            if any(target in title_lower for target in target_channels):
-                                # Проверка доступности с учетом IP
-                                try:
-                                    async with session.head(
-                                        channel_info["url"], 
-                                        timeout=10,
-                                        headers=headers
-                                    ) as resp:
-                                        if resp.status == 200:
-                                            valid_channels.append((channel_info["title"], channel_info["url"]))
-                                except Exception:
+        lines = res.text.splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith("#EXTINF"):
+                parts = line.split(',', 1)
+                if len(parts) < 2:
+                    continue
+                channel_name = parts[1].strip()
+                if channel_name in config.CHANNEL_NAMES:
+                    if i + 1 < len(lines):
+                        stream_url = lines[i + 1].strip()
+                        if not stream_url.startswith("http"):
+                            continue
+                        try:
+                            head_res = requests.head(stream_url, timeout=10, allow_redirects=True)
+                            if head_res.status_code != 200:
+                                get_res = requests.get(stream_url, timeout=10, allow_redirects=True)
+                                if get_res.status_code != 200:
                                     continue
-                            channel_info = {}
+                        except requests.RequestException:
+                            continue
+                        working_entries.append((line, stream_url))
 
+    if not working_entries:
+        bot.send_message(chat_id, "Не удалось найти рабочие потоки.")
+        return
+
+    m3u_lines = ["#EXTM3U"]
+    for extinf, url in working_entries:
+        m3u_lines.append(extinf)
+        m3u_lines.append(url)
+
+    playlist_data = "\n".join(m3u_lines)
+    temp_filename = "result.m3u"
+    with open(temp_filename, "w", encoding="utf-8") as f:
+        f.write(playlist_data)
+
+    try:
+        with open(temp_filename, "rb") as f:
+            upload_res = requests.post("https://file.io", files={"file": f})
+        file_link = upload_res.json().get("link") or upload_res.json().get("url")
     except Exception as e:
-        logger.error(f"Ошибка проверки каналов: {str(e)}")
-    
-    return valid_channels
+        bot.send_message(chat_id, f"Ошибка загрузки файла: {e}")
+        return
 
-# Веб-сервер для Render
-async def health_check(request):
-    return web.Response(text="Bot is alive!")
-
-async def start_web_app():
-    app = web.Application()
-    app.add_routes([web.get("/", health_check)])
-    return app
-
-async def main():
-    # Запуск веб-сервера
-    web_app = await start_web_app()
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    
-    port = int(os.environ.get("PORT", 5000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    
-    # Запуск бота
-    await dp.start_polling(bot)
+    if not file_link:
+        bot.send_message(chat_id, "Не удалось получить ссылку.")
+    else:
+        bot.send_message(chat_id, f"Ваш плейлист готов: {file_link}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("Бот запущен.")
+    bot.infinity_polling(skip_pending=True)
