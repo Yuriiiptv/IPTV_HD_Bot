@@ -6,93 +6,117 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 from aiohttp import web
+
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import re
+
 import config
 
-# Настройка логов
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# === Google Sheets ===
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive"
+]
+creds = ServiceAccountCredentials.from_json_keyfile_name(
+    config.GOOGLE_CREDS_FILE, scope
+)
+gc = gspread.authorize(creds)
+sheet = gc.open(config.SHEET_NAME).worksheet(config.SHEET_TAB_NAME)
+
+# Компилируем регулярное выражение для фильтрации каналов
+pattern = re.compile(
+    r'^(?:' + '|'.join(re.escape(name) for name in config.WANTED_CHANNELS) + r')$',
+    re.IGNORECASE
+)
 
 # Инициализация бота и диспетчера
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
-# Обработчик команды /start
+# Проверка валидности .m3u-плейлиста по минимуму 1 каналу
+def is_playlist_valid(lines: list[str]) -> bool:
+    if not lines or not lines[0].startswith("#EXTM3U"):
+        return False
+    # хотя бы один канал
+    return any(line.startswith("#EXTINF") for line in lines)
+
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "Привет! Я могу собрать плейлист из популярных каналов.\n"
-        "Используй команду /playlist чтобы получить актуальный список."
+        "Привет! Я могу собрать для тебя плейлист из федеральных телеканалов.\n"
+        "Используй команду /playlist — и я пришлю готовый .m3u файл."
     )
 
-# Обработчик команды /playlist
 @dp.message(Command("playlist"))
 async def get_playlist(message: types.Message):
     try:
-        await message.answer("⏳ Загружаю и проверяю плейлисты...")
-        target_channels = [name.lower() for name in config.CHANNEL_NAMES]
-        found_channels = []
-        
+        await message.answer("⏳ Загружаю и обрабатываю плейлисты из Google Sheets...")
+
+        # 1) Считываем все URL из колонки B, пропуская заголовок
+        urls = sheet.col_values(2)[1:]
+
+        found_channels: list[tuple[str,str]] = []
+
         async with aiohttp.ClientSession() as session:
-            # Загрузка плейлистов
-            playlists = []
-            async def fetch_playlist(url):
+            # 2) Загрузка каждого плейлиста и фильтрация по названиям
+            for url in urls:
+                url = url.strip()
+                if not url.startswith("http"):
+                    continue
+
                 try:
                     async with session.get(url, timeout=15) as resp:
-                        return await resp.text() if resp.status == 200 else None
+                        text = await resp.text() if resp.status == 200 else None
                 except Exception as e:
-                    logger.error(f"Ошибка загрузки {url}: {str(e)}")
-                    return None
-            
-            tasks = [fetch_playlist(url) for url in config.M3U_URLS]
-            results = await asyncio.gather(*tasks)
-            playlists = [text for text in results if text]
+                    logger.error(f"Ошибка загрузки {url}: {e}")
+                    continue
 
-            # Парсинг плейлистов
-            for playlist in playlists:
-                lines = playlist.splitlines()
-                channel_info = {}
-                
-                for line in lines:
-                    line = line.strip()
+                if not text:
+                    continue
+
+                lines = text.splitlines()
+                if not is_playlist_valid(lines):
+                    continue
+
+                # парсим блоки #EXTINF + следующую за ним строку URL
+                for i, line in enumerate(lines):
                     if line.startswith("#EXTINF"):
                         parts = line.split(",", 1)
-                        if len(parts) > 1:
-                            channel_info["title"] = parts[1].strip()
-                    elif line and not line.startswith("#"):
-                        channel_info["url"] = line
-                        if "title" in channel_info:
-                            title_lower = channel_info["title"].lower()
-                            if any(target in title_lower for target in target_channels):
-                                found_channels.append((channel_info["title"], channel_info["url"]))
-                            channel_info = {}
+                        title = parts[1].strip() if len(parts) > 1 else ""
+                        stream_url = lines[i+1].strip() if i+1 < len(lines) else ""
+                        # полное совпадение названия канала
+                        if pattern.match(title):
+                            found_channels.append((title, stream_url))
 
-            # Проверка доступности каналов
-            valid_channels = []
-            async def check_channel(url):
+            # 3) Проверяем, какие из найденных каналов действительно доступны
+            valid_channels: list[tuple[str,str]] = []
+            for title, stream_url in found_channels:
                 try:
-                    async with session.head(url, timeout=10) as resp:
-                        return resp.status == 200
-                except Exception as e:
-                    logger.error(f"Ошибка проверки {url}: {str(e)}")
-                    return False
-            
-            check_tasks = [check_channel(url) for _, url in found_channels]
-            statuses = await asyncio.gather(*check_tasks)
-            valid_channels = [ch for ch, ok in zip(found_channels, statuses) if ok]
+                    async with session.head(stream_url, timeout=10) as resp2:
+                        if resp2.status == 200:
+                            valid_channels.append((title, stream_url))
+                except Exception:
+                    continue
 
-        # Формирование M3U
+        # 4) Собираем итоговый .m3u
         if not valid_channels:
-            return await message.answer("❌ Не удалось найти рабочие каналы")
+            return await message.answer("❌ Не удалось найти ни одного рабочего канала.")
 
-        m3u_content = "#EXTM3U\n" + "\n".join(
-            f"#EXTINF:-1,{title}\n{url}" 
-            for title, url in valid_channels
-        )
-        
-        # Отправка файла
-        file = BufferedInputFile(
+        m3u_lines = ["#EXTM3U"]
+        for title, stream_url in valid_channels:
+            m3u_lines.append(f"#EXTINF:-1,{title}")
+            m3u_lines.append(stream_url)
+        m3u_content = "\n".join(m3u_lines)
+
+        # 5) Отправляем файл пользователю
+file = BufferedInputFile(
             m3u_content.encode("utf-8"),
-            filename="russian_channels.m3u"
+            filename="federal_channels.m3u"
         )
         await message.answer_document(
             file,
@@ -100,7 +124,7 @@ async def get_playlist(message: types.Message):
         )
 
     except Exception as e:
-        logger.error(f"Критическая ошибка: {str(e)}")
+        logger.error(f"Критическая ошибка: {e}")
         await message.answer("⚠️ Произошла внутренняя ошибка. Попробуйте позже.")
 
 # Веб-сервер для Render
@@ -113,17 +137,15 @@ async def start_web_app():
     return app
 
 async def main():
-    # Запуск веб-сервера
     web_app = await start_web_app()
     runner = web.AppRunner(web_app)
     await runner.setup()
-    
+
     port = int(os.environ.get("PORT", 5000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    
-    # Запуск бота
+
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
+if name == "__main__":
     asyncio.run(main())
