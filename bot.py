@@ -26,7 +26,7 @@ scope = [
 ]
 
 # Читаем JSON из Environment и создаём creds
-creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])
+creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])  # Убедитесь, что переменная существует
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
 
@@ -51,14 +51,12 @@ def is_playlist_valid(lines: list[str]) -> bool:
         return False
     return any(line.strip().startswith("#EXTINF") for line in lines)
 
-
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
         "Привет! Я могу собрать для тебя плейлист из федеральных телеканалов.\n"
         "Используй команду /playlist — и я пришлю готовый .m3u файл."
     )
-
 
 @dp.message(Command("playlist"))
 async def get_playlist(message: types.Message):
@@ -120,9 +118,8 @@ async def get_playlist(message: types.Message):
 
         m3u_lines = ["#EXTM3U"]
         for title, stream_url in valid_channels:
-
-        m3u_lines.append(f"#EXTINF:-1,{title}")
-            m3u_lines.append(stream_url)
+            m3u_lines.append(f"#EXTINF:-1,{title}")  # Исправлен отступ
+            m3u_lines.append(stream_url)  # Исправлен отступ
         m3u_content = "\n".join(m3u_lines)
 
         # 5) Отправляем как файл
@@ -139,17 +136,14 @@ async def get_playlist(message: types.Message):
         logger.error(f"Критическая ошибка в /playlist: {e}")
         await message.answer("⚠️ Произошла внутренняя ошибка. Попробуйте позже.")
 
-
 # Health-check для Render
 async def health_check(request):
     return web.Response(text="Bot is alive!")
-
 
 async def start_web_app():
     app = web.Application()
     app.add_routes([web.get("/", health_check)])
     return app
-
 
 async def main():
     # Запускаем веб-сервер
@@ -163,6 +157,5 @@ async def main():
     # Запускаем polling
     await dp.start_polling(bot)
 
-
-if name == "__main__":
+if __name__ == "__main__":  # Исправлено: добавлены двойные подчеркивания
     asyncio.run(main())
