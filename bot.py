@@ -121,7 +121,7 @@ async def get_playlist(message: types.Message):
         m3u_lines = ["#EXTM3U"]
         for title, stream_url in valid_channels:
 
-m3u_lines.append(f"#EXTINF:-1,{title}")
+        m3u_lines.append(f"#EXTINF:-1,{title}")
             m3u_lines.append(stream_url)
         m3u_content = "\n".join(m3u_lines)
 
