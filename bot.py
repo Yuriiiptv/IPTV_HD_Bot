@@ -22,9 +22,12 @@ scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
 ]
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    config.GOOGLE_CREDS_FILE, scope
-)
+import os, json
+from oauth2client.service_account import ServiceAccountCredentials
+
+# Вместо чтения из файла, парсим JSON из переменной окружения:
+creds_dict = json.loads(os.environ['GOOGLE_CREDS_JSON'])
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
 sheet = gc.open(config.SHEET_NAME).worksheet(config.SHEET_TAB_NAME)
 
