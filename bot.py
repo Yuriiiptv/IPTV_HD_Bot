@@ -89,15 +89,6 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
         logger.error(f"Ошибка обработки {url}: {e}")
         return None
 
-                
-            # Формируем имя файла из URL
-            playlist_name = url.split('/')[-1].split('?')[0] or "playlist.m3u"
-            return playlist_name, "\n".join(["#EXTM3U"] + valid_entries)
-            
-    except Exception as e:
-        logger.error(f"Ошибка обработки {url}: {e}")
-        return None
-
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
@@ -112,7 +103,7 @@ async def get_playlists(message: types.Message):
 
         # Получаем URL из Google Sheets
         urls = sheet.col_values(2)[1:]
-        
+
         # Обрабатываем все плейлисты
         valid_playlists = []
         async with aiohttp.ClientSession() as session:
@@ -148,7 +139,7 @@ async def get_playlists(message: types.Message):
         logger.error(f"Критическая ошибка: {e}")
         await message.answer("⚠️ Произошла внутренняя ошибка. Попробуйте позже.")
 
-# Health-check и запуск (без изменений)
+# Health-check и запуск
 async def health_check(request):
     return web.Response(text="Bot is alive!")
 
