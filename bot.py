@@ -49,34 +49,46 @@ def is_playlist_valid(lines: list[str]) -> bool:
     return any(line.strip().startswith("#EXTINF") for line in lines)
 
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
-    """Обработка одного плейлиста"""
+    """Обработка одного плейлиста с реальной проверкой рабочих потоков"""
     try:
         async with session.get(url, timeout=15) as resp:
             if resp.status != 200:
                 return None
-                
+
             content = await resp.text()
-            if not is_playlist_valid(content.splitlines()):
-                return None
-                
-            # Фильтрация каналов
-            valid_entries = []
             lines = content.splitlines()
-            
+
+            if not is_playlist_valid(lines):
+                return None
+
+            valid_entries = []
+
             for i in range(len(lines)):
                 if lines[i].startswith("#EXTINF"):
                     title = lines[i].split(",", 1)[-1].strip()
                     if pattern.match(title):
-                        if i+1 < len(lines) and lines[i+1].startswith('http'):
+                        if i + 1 < len(lines) and lines[i + 1].startswith("http"):
+                            stream_url = lines[i + 1]
                             try:
-                                async with session.head(lines[i+1], timeout=10) as channel_resp:
+                                async with session.get(stream_url, timeout=10) as channel_resp:
                                     if channel_resp.status == 200:
-                                        valid_entries.extend([lines[i], lines[i+1]])
-                            except:
+                                        chunk = await channel_resp.content.read(512)
+                                        if chunk:
+                                            valid_entries.extend([lines[i], stream_url])
+                            except Exception as e:
+                                logger.warning(f"Ошибка потока {stream_url}: {e}")
                                 continue
-                                
+
             if not valid_entries:
                 return None
+
+            playlist_name = url.split("/")[-1].split("?")[0] or "playlist.m3u"
+            return playlist_name, "\n".join(["#EXTM3U"] + valid_entries)
+
+    except Exception as e:
+        logger.error(f"Ошибка обработки {url}: {e}")
+        return None
+
                 
             # Формируем имя файла из URL
             playlist_name = url.split('/')[-1].split('?')[0] or "playlist.m3u"
