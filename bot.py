@@ -43,13 +43,9 @@ bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
 def is_playlist_valid(lines: list[str]) -> bool:
-    """Проверка валидности плейлиста"""
-    if not lines or not lines[0].strip().startswith("#EXTM3U"):
-        return False
-    return any(line.strip().startswith("#EXTINF") for line in lines)
+    return lines and lines[0].strip().startswith("#EXTM3U") and any(line.strip().startswith("#EXTINF") for line in lines)
 
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
-    """Обработка одного плейлиста с реальной проверкой рабочих потоков"""
     try:
         async with session.get(url, timeout=15) as resp:
             if resp.status != 200:
@@ -62,11 +58,13 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                 return None
 
             valid_entries = []
+            seen_titles = set()
 
-            for i in range(len(lines)):
+            i = 0
+            while i < len(lines):
                 if lines[i].startswith("#EXTINF"):
                     title = lines[i].split(",", 1)[-1].strip()
-                    if pattern.match(title):
+                    if pattern.match(title) and title not in seen_titles:
                         if i + 1 < len(lines) and lines[i + 1].startswith("http"):
                             stream_url = lines[i + 1]
                             try:
@@ -75,9 +73,10 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                                         chunk = await channel_resp.content.read(512)
                                         if chunk:
                                             valid_entries.extend([lines[i], stream_url])
+                                            seen_titles.add(title)
                             except Exception as e:
                                 logger.warning(f"Ошибка потока {stream_url}: {e}")
-                                continue
+                i += 1
 
             if not valid_entries:
                 return None
@@ -101,11 +100,8 @@ async def get_playlists(message: types.Message):
     try:
         processing_msg = await message.answer("⏳ Загружаю и проверяю плейлисты...")
 
-        # Получаем URL из Google Sheets
         urls = sheet.col_values(2)[1:]
 
-        # Обрабатываем все плейлисты
-        valid_playlists = []
         async with aiohttp.ClientSession() as session:
             tasks = [process_playlist(url.strip(), session) for url in urls if url.strip()]
             results = await asyncio.gather(*tasks)
@@ -114,7 +110,6 @@ async def get_playlists(message: types.Message):
         if not valid_playlists:
             return await message.answer("❌ Не найдено валидных плейлистов")
 
-        # Отправляем каждый плейлист отдельным сообщением
         success_count = 0
         for name, content in valid_playlists:
             try:
@@ -122,24 +117,18 @@ async def get_playlists(message: types.Message):
                     content.encode("utf-8"),
                     filename=name
                 )
-                await message.answer_document(
-                    file,
-                    caption=f"✅ {name}"
-                )
+                await message.answer_document(file, caption=f"✅ {name}")
                 success_count += 1
-                await asyncio.sleep(1)  # Задержка между отправками
+                await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f"Ошибка отправки {name}: {e}")
 
-        await message.answer(
-            f"🎉 Готово! Успешно обработано плейлистов: {success_count}/{len(valid_playlists)}"
-        )
+        await message.answer(f"🎉 Готово! Успешно обработано плейлистов: {success_count}/{len(valid_playlists)}")
 
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
         await message.answer("⚠️ Произошла внутренняя ошибка. Попробуйте позже.")
 
-# Health-check и запуск
 async def health_check(request):
     return web.Response(text="Bot is alive!")
 
