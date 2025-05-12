@@ -40,68 +40,64 @@ def is_playlist_valid(lines: list[str]) -> bool:
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
     """
     Обработка одного плейлиста:
-    - Сначала проверяем базовый формат (#EXTM3U, хотя бы один #EXTINF).
-    - Проверяем работоспособность первого или второго потока.
-    - Если один из первых двух — рабочий, фильтруем весь плейлист по WANTED_CHANNELS.
-    - Возвращаем отфильтрованный плейлист, если найдены нужные каналы.
+    1) Проверка базового формата (#EXTM3U и #EXTINF).
+    2) Проверка работоспособности первого или второго потока.
+    3) Фильтрация по WANTED_CHANNELS: собираем только совпавшие каналы.
+    4) Если совпадения есть, возвращаем отфильтрованный плейлист; иначе None.
     """
     try:
         async with session.get(url, timeout=15) as resp:
             if resp.status != 200:
                 return None
+
             content = await resp.text()
             lines = content.splitlines()
 
-            # Базовая валидация
+            # 1) Базовая проверка
             if not is_playlist_valid(lines):
                 return None
 
-            # Проверяем первые два потока
-            extinf_indices = [i for i, line in enumerate(lines) if line.lower().startswith('#extinf')]
-            valid_first_two = False
+            # 2) Проверяем первые два потока
+            extinf_indices = [i for i, ln in enumerate(lines) if ln.lower().startswith('#extinf')]
+            alive = False
             for idx in extinf_indices[:2]:
                 if idx + 1 < len(lines) and lines[idx+1].startswith(('http://', 'https://')):
                     try:
-                        async with session.get(lines[idx+1], timeout=10) as ch_resp:
-                            if ch_resp.status == 200:
-                                chunk = await ch_resp.content.read(256)
-                                if chunk:
-                                    valid_first_two = True
-                                    break
-                    except Exception:
-                        continue
-            if not valid_first_two:
+                        async with session.get(lines[idx+1], timeout=10) as ch:
+                            if ch.status == 200 and await ch.content.read(256):
+                                alive = True
+                                break
+                    except:
+                        pass
+            if not alive:
                 return None
 
-            # Фильтрация нужных каналов
+            # 3) Фильтрация по названию каналов
             valid_entries = []
-            seen_titles = set()
+            seen = set()
             for idx in extinf_indices:
                 title = lines[idx].split(',', 1)[-1].strip()
-                if any(w.lower() in title.lower() for w in config.WANTED_CHANNELS) and title not in seen_titles:
-                    # проверяем поток
-                    if idx+1 < len(lines) and lines[idx+1].startswith(('http://', 'https://')):
+                if title not in seen and any(w.lower() in title.lower() for w in config.WANTED_CHANNELS):
+                    # проверка потока
+                    stream = lines[idx+1] if idx+1 < len(lines) else None
+                    if stream and stream.startswith(('http://','https://')):
                         try:
-                            async with session.get(lines[idx+1], timeout=10) as ch_resp:
-                                if ch_resp.status == 200:
-                                    chunk = await ch_resp.content.read(256)
-                                    if chunk:
-                                        valid_entries.extend([lines[idx], lines[idx+1]])
-                                        seen_titles.add(title)
-                        except Exception:
-                            continue
+                            async with session.get(stream, timeout=10) as ch2:
+                                if ch2.status == 200 and await ch2.content.read(256):
+                                    valid_entries += [lines[idx], stream]
+                                    seen.add(title)
+                        except:
+                            pass
 
+            # 4) Вернуть только если есть совпадения
             if not valid_entries:
                 return None
 
-            # Формируем более оригинальное имя файла на основе URL
-            parts = url.rstrip('/').split('/')
-            filename = parts[-1].split('?')[0]
-            folder = parts[-2] if len(parts) >= 2 else 'playlist'
-            playlist_name = f"{folder}_{filename}"
-
-            filtered = ['#EXTM3U'] + valid_entries
-            return playlist_name, '\n'.join(filtered)
+            # Формируем имя файла как оригинал
+            filename = url.rstrip('/').split('/')[-1].split('?')[0]
+            playlist_name = filename or 'playlist.m3u8'
+            final = ['#EXTM3U'] + valid_entries
+            return playlist_name, '\n'.join(final)
 
     except Exception as e:
         logger.error(f"Ошибка обработки {url}: {e}")
@@ -110,36 +106,36 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "Привет! Я собираю плейлисты, фильтруя только те, где хотя бы первый или второй канал живой.\n"
-        "Используй /playlist — и я пришлю готовые файлы."
+        "Привет! Я проверяю плейлисты и фильтрую только указанные каналы.\n"
+        "Используй /playlist, чтобы получить результат."
     )
 
 @dp.message(Command("playlist"))
 async def get_playlists(message: types.Message):
     try:
-        await message.answer("⏳ Загружаю и проверяю плейлисты...")
+        await message.answer("⏳ Загружаю и фильтрую плейлисты...")
         urls = sheet.col_values(2)[1:]
         async with aiohttp.ClientSession() as session:
-            tasks = [process_playlist(url.strip(), session) for url in urls if url.strip()]
-            results = await asyncio.gather(*tasks)
-            valid_playlists = [res for res in results if res]
+            tasks = [process_playlist(u.strip(), session) for u in urls if u.strip()]
+            res = await asyncio.gather(*tasks)
+            valid = [r for r in res if r]
 
-        if not valid_playlists:
+        if not valid:
             return await message.answer("❌ Не найдено подходящих плейлистов")
 
-        sent = 0
-        for name, content in valid_playlists:
+        cnt = 0
+        for name, content in valid:
             file = BufferedInputFile(content.encode('utf-8'), filename=name)
             await message.answer_document(file, caption=f"✅ {name}")
-            sent += 1
+            cnt += 1
             await asyncio.sleep(1)
 
-        await message.answer(f"🎉 Отправлено плейлистов: {sent}/{len(valid_playlists)}")
+        await message.answer(f"🎉 Отправлено: {cnt}/{len(valid)}")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
-        await message.answer("⚠️ Внутренняя ошибка. Попробуйте позже.")
+        await message.answer("⚠️ Ошибка. Попробуйте позже.")
 
-# Health-check и запуск
+# Health-check для Render
 async def health_check(request):
     return web.Response(text="Bot is alive!")
 
@@ -155,7 +151,6 @@ async def main():
     port = int(os.environ.get('PORT', 5000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
