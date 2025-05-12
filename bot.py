@@ -50,9 +50,12 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
 
             # Если базовый формат корректен — возвращаем весь плейлист
             if is_playlist_valid(lines):
-                playlist_name = url.split('/')[-1].split('?')[0] or "playlist.m3u8"
-                return playlist_name, content
-            return None
+         parts = url.rstrip('/').split('/')
+         folder = parts[-2]
+         base = parts[-1].split('?')[0]
+         playlist_name = f"{folder}_{base}"
+         return playlist_name, content
+         return None
 
     except Exception as e:
         logger.error(f"Ошибка обработки {url}: {e}")
