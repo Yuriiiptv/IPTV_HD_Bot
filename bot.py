@@ -36,7 +36,11 @@ dp = Dispatcher()
 
 def is_playlist_valid(lines: list[str]) -> bool:
     """Проверка базового формата M3U плейлиста"""
-    return bool(lines) and lines[0].strip().lower().startswith("#extm3u") and any(line.strip().lower().startswith("#extinf") for line in lines)
+    return (
+        bool(lines)
+        and lines[0].strip().lower().startswith("#extm3u")
+        and any(line.strip().lower().startswith("#extinf") for line in lines)
+    )
 
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
     """Обработка одного плейлиста: если формат верен, возвращаем весь оригинальный контент"""
@@ -50,12 +54,15 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
 
             # Если базовый формат корректен — возвращаем весь плейлист
             if is_playlist_valid(lines):
-         parts = url.rstrip('/').split('/')
-         folder = parts[-2]
-         base = parts[-1].split('?')[0]
-         playlist_name = f"{folder}_{base}"
-         return playlist_name, content
-         return None
+                # Формируем понятное имя файла по URL
+                parts = url.rstrip('/').split('/')
+                folder = parts[-2] if len(parts) >= 2 else ''
+                base = parts[-1].split('?')[0]
+                playlist_name = f"{folder}_{base}" if folder else base
+                return playlist_name, content
+
+            # Иначе — невалидный
+            return None
 
     except Exception as e:
         logger.error(f"Ошибка обработки {url}: {e}")
