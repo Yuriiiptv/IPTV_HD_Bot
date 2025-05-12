@@ -40,10 +40,9 @@ def is_playlist_valid(lines: list[str]) -> bool:
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
     """
     Обработка одного плейлиста:
-    1) Проверка базового формата (#EXTM3U и #EXTINF).
-    2) Проверка работоспособности первого или второго потока.
-    3) Фильтрация по WANTED_CHANNELS: собираем только совпавшие каналы.
-    4) Если совпадения есть, возвращаем отфильтрованный плейлист; иначе None.
+    - Проверяем базовый формат (#EXTM3U и #EXTINF).
+    - Проверяем работоспособность первого или второго потока.
+    - Если один из них жив, возвращаем **весь** оригинальный плейлист.
     """
     try:
         async with session.get(url, timeout=15) as resp:
@@ -53,51 +52,23 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             content = await resp.text()
             lines = content.splitlines()
 
-            # 1) Базовая проверка
+            # Проверка формата
             if not is_playlist_valid(lines):
                 return None
 
-            # 2) Проверяем первые два потока
+            # Проверяем первые два потока
             extinf_indices = [i for i, ln in enumerate(lines) if ln.lower().startswith('#extinf')]
-            alive = False
             for idx in extinf_indices[:2]:
                 if idx + 1 < len(lines) and lines[idx+1].startswith(('http://', 'https://')):
                     try:
                         async with session.get(lines[idx+1], timeout=10) as ch:
                             if ch.status == 200 and await ch.content.read(256):
-                                alive = True
-                                break
-                    except:
-                        pass
-            if not alive:
-                return None
-
-            # 3) Фильтрация по названию каналов
-            valid_entries = []
-            seen = set()
-            for idx in extinf_indices:
-                title = lines[idx].split(',', 1)[-1].strip()
-                if title not in seen and any(w.lower() in title.lower() for w in config.WANTED_CHANNELS):
-                    # проверка потока
-                    stream = lines[idx+1] if idx+1 < len(lines) else None
-                    if stream and stream.startswith(('http://','https://')):
-                        try:
-                            async with session.get(stream, timeout=10) as ch2:
-                                if ch2.status == 200 and await ch2.content.read(256):
-                                    valid_entries += [lines[idx], stream]
-                                    seen.add(title)
-                        except:
-                            pass
-
-            # 4) Вернуть только если есть совпадения
-            if not valid_entries:
-                return None
-
-            # Формируем имя файла как оригинал
-            filename = url.rstrip('/').split('/')[-1].split('?')[0]
-            playlist_name = filename or 'playlist.m3u8'
-            final = ['#EXTM3U'] + valid_entries
-            return playlist_name, '\n'.join(final)
+                                # живая запись — возвращаем весь оригинал
+                                filename = url.rstrip('/').split('/')[-1].split('?')[0] or 'playlist.m3u8'
+                                return filename, content
+                    except Exception:
+                        continue
+            return None
 
     except Exception as e:
         logger.error(f"Ошибка обработки {url}: {e}")
@@ -106,14 +77,14 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "Привет! Я проверяю плейлисты и фильтрую только указанные каналы.\n"
-        "Используй /playlist, чтобы получить результат."
+        "Привет! Я проверяю плейлисты: валидны по формату и по первым двум потокам.\n"
+        "Используй /playlist, и я пришлю **всe** рабочие плейлисты из таблицы."
     )
 
 @dp.message(Command("playlist"))
 async def get_playlists(message: types.Message):
     try:
-        await message.answer("⏳ Загружаю и фильтрую плейлисты...")
+        await message.answer("⏳ Загружаю и проверяю плейлисты...")
         urls = sheet.col_values(2)[1:]
         async with aiohttp.ClientSession() as session:
             tasks = [process_playlist(u.strip(), session) for u in urls if u.strip()]
@@ -121,19 +92,19 @@ async def get_playlists(message: types.Message):
             valid = [r for r in res if r]
 
         if not valid:
-            return await message.answer("❌ Не найдено подходящих плейлистов")
+            return await message.answer("❌ Не найдено рабочих плейлистов")
 
-        cnt = 0
+        count = 0
         for name, content in valid:
             file = BufferedInputFile(content.encode('utf-8'), filename=name)
             await message.answer_document(file, caption=f"✅ {name}")
-            cnt += 1
+            count += 1
             await asyncio.sleep(1)
 
-        await message.answer(f"🎉 Отправлено: {cnt}/{len(valid)}")
+        await message.answer(f"🎉 Отправлено рабочих плейлистов: {count}/{len(valid)}")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
-        await message.answer("⚠️ Ошибка. Попробуйте позже.")
+        await message.answer("⚠️ Внутренняя ошибка. Попробуйте позже.")
 
 # Health-check для Render
 async def health_check(request):
