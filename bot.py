@@ -59,18 +59,6 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                 folder = parts[-2] if len(parts) >= 2 else ''
                 base = parts[-1].split('?')[0]
                 playlist_name = f"{folder}_{base}" if folder else base
-                 # 🔴 ВСТАВИТЬ ФИЛЬТРАЦИЮ КАНАЛОВ СРАЗУ НИЖЕ ЭТОЙ СТРОКИ 🔴
-        filtered = [lines[0]]  # всегда держим заголовок #EXTM3U
-        for i, line in enumerate(lines):
-            if line.strip().lower().startswith("#extinf") and any(
-                w.lower() in line.lower() for w in config.WANTED_CHANNELS
-            ):
-                filtered.append(line)               # строка #EXTINF
-                if i+1 < len(lines):
-                    filtered.append(lines[i+1])     # следующий URL
-        content = "\n".join(filtered)
-        # 🔴 КОНЕЦ БЛОКА ФИЛЬТРАЦИИ 🔴
-
                 return playlist_name, content
 
             # Иначе — невалидный
@@ -93,6 +81,8 @@ async def get_playlists(message: types.Message):
         await message.answer("⏳ Проверяю плейлисты...")
 
         urls = sheet.col_values(2)[1:]
+        # Фильтруем только корректные URL
+        urls = [u.strip() for u in urls if u.strip().startswith(('http://','https://'))]
         async with aiohttp.ClientSession() as session:
             tasks = [process_playlist(url.strip(), session) for url in urls if url.strip()]
             results = await asyncio.gather(*tasks)
