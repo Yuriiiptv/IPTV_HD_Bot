@@ -56,9 +56,8 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             if not is_playlist_valid(lines):
                 return None
 
-            # Найдём индексы всех #EXTINF
+            # Проверяем первые два потока
             extinf_indices = [i for i, line in enumerate(lines) if line.lower().startswith('#extinf')]
-            # Проверим первые два потока
             valid_first_two = False
             for idx in extinf_indices[:2]:
                 if idx + 1 < len(lines) and lines[idx+1].startswith(('http://', 'https://')):
@@ -95,7 +94,12 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             if not valid_entries:
                 return None
 
-            playlist_name = url.split('/')[-1].split('?')[0] or 'playlist.m3u8'
+            # Формируем более оригинальное имя файла на основе URL
+            parts = url.rstrip('/').split('/')
+            filename = parts[-1].split('?')[0]
+            folder = parts[-2] if len(parts) >= 2 else 'playlist'
+            playlist_name = f"{folder}_{filename}"
+
             filtered = ['#EXTM3U'] + valid_entries
             return playlist_name, '\n'.join(filtered)
 
