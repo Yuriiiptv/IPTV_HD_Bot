@@ -77,8 +77,7 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             if len(filtered) <= 1:
                 return None
 
-            new_content = "
-".join(filtered)
+        content = "\n".join(filtered)
             # Составляем понятное имя файла
             parts = url.rstrip("/").split("/")
             folder = parts[-2] if len(parts) >= 2 else ""
