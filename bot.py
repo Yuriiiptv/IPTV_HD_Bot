@@ -2,11 +2,11 @@ import os
 import json
 import asyncio
 import logging
+import random
 import aiohttp
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile
 from aiohttp import web
 
 import gspread
@@ -36,7 +36,10 @@ dp = Dispatcher()
 
 # === Новое: in-memory хранилище плейлистов и базовый URL ===
 playlist_store: dict[str, str] = {}
-BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("BASE_URL", "https://your-app.com"))
+BASE_URL = os.environ.get("RENDER_EXTERNAL_URL",
+                         os.environ.get("BASE_URL", "https://your-app.com"))
+# Сколько потоков проверяем выборочно
+SAMPLE_SIZE = 3
 # ===========================================================
 
 def is_playlist_valid(lines: list[str]) -> bool:
@@ -48,7 +51,7 @@ def is_playlist_valid(lines: list[str]) -> bool:
     )
 
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
-    """Загружает M3U-плейлист, проверяет валидность и фильтрует каналы по списку в config.WANTED_CHANNELS."""
+    """Загружает M3U, фильтрует по имени и проверяет выборочно SAMPLE_SIZE потоков."""
     try:
         async with session.get(url, timeout=15) as resp:
             if resp.status != 200:
@@ -57,28 +60,49 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             content = await resp.text()
             lines = content.splitlines()
 
-            # Базовая валидация M3U
+            # базовая валидация
             if not is_playlist_valid(lines):
                 return None
 
-            # Фильтрация по имени канала
             filtered = ["#EXTM3U"]
+            streams = []
             i = 0
             while i < len(lines):
                 line = lines[i].strip()
                 if line.lower().startswith("#extinf"):
                     _, info = line.split(",", 1) if "," in line else ("", line)
+                    stream_url = lines[i+1].strip() if i+1 < len(lines) else ""
+                    # фильтрация по имени
                     if any(key.lower() in info.lower() for key in config.WANTED_CHANNELS):
                         filtered.append(lines[i])
-                        if i + 1 < len(lines):
-                            filtered.append(lines[i+1])
+                        filtered.append(lines[i+1])
+                        streams.append(stream_url)
                     i += 2
                 else:
                     i += 1
 
-            if len(filtered) <= 1:
+            # нет ни одного подходящего по имени
+            if not streams:
                 return None
 
+            # выбираем SAMPLE_SIZE потоков для проверки
+            sample_urls = random.sample(streams, min(SAMPLE_SIZE, len(streams)))
+
+            # проверяем HEAD-запросом
+            alive_count = 0
+            for s_url in sample_urls:
+                try:
+                    async with session.head(s_url, timeout=5) as r:
+                        if r.status == 200:
+                            alive_count += 1
+                except Exception:
+                    pass
+
+            # если хотя бы один из SAMPLE_SIZE не живой — нерабочий
+            if alive_count < len(sample_urls):
+                return None
+
+            # формируем имя и возвращаем
             new_content = "\n".join(filtered)
             parts = url.rstrip("/").split("/")
             folder = parts[-2] if len(parts) >= 2 else ""
@@ -94,8 +118,8 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "Привет! Я могу проверить M3U плейлист на валидность формата и вернуть отфильтррованные каналы.\n"
-        "Используй команду /playlist — и я пришлю ссылки на те плейлисты, которые подходят по списку."
+        "Привет! Я могу проверить M3U плейлист на валидность формата, отфильтровать по вашим каналам "
+        "и выборочно протестировать 3 потока. Используйте /playlist."
     )
 
 @dp.message(Command("playlist"))
@@ -103,30 +127,30 @@ async def get_playlists(message: types.Message):
     await message.answer("⏳ Проверяю плейлисты...")
 
     urls = sheet.col_values(2)[1:]
-    urls = [u.strip() for u in urls if u.strip().startswith(('http://','https://'))]
+    urls = [u.strip() for u in urls if u.strip().startswith(("http://", "https://"))]
 
     async with aiohttp.ClientSession() as session:
-        tasks = [process_playlist(url, session) for url in urls]
+        tasks = [process_playlist(u, session) for u in urls]
         results = await asyncio.gather(*tasks)
-        valid_playlists = [res for res in results if res]
+        valid = [r for r in results if r]
 
-    if not valid_playlists:
+    if not valid:
         return await message.answer("❌ Не найдено подходящих каналов в плейлистах.")
 
-    for name, content in valid_playlists:
+    for name, content in valid:
         playlist_store[name] = content
         link = f"{BASE_URL}/playlist/{name}.m3u"
         await message.answer(f"✅ Ваш плейлист: {link}")
         await asyncio.sleep(1)
 
-# Health-check и раздача плейлиста по HTTP
+# Health-check и раздача по HTTP
 async def health_check(request):
     return web.Response(text="Bot is alive!")
 
 async def serve_playlist(request):
     name = request.match_info['name']
     content = playlist_store.get(name)
-    if not content:
+    if content is None:
         return web.Response(status=404, text="Not found")
     return web.Response(
         text=content,
@@ -145,10 +169,9 @@ async def main():
     web_app = await start_web_app()
     runner = web.AppRunner(web_app)
     await runner.setup()
-    port = int(os.environ.get('PORT', 5000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    port = int(os.environ.get("PORT", 5000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
