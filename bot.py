@@ -93,8 +93,7 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "Привет! Я могу проверить M3U плейлист на валидность формата и вернуть отфильтрованные каналы.
-"
+        "Привет! Я могу проверить M3U плейлист на валидность формата и вернуть отфильтрованные каналы."
         "Используй команду /playlist — и я пришлю только те каналы, которые есть в моём списке."
     )
 
