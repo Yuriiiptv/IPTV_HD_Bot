@@ -11,7 +11,6 @@ from aiohttp import web
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-
 import config
 
 # Логирование
@@ -34,89 +33,95 @@ sheet = gc.open(config.SHEET_NAME).worksheet(config.SHEET_TAB_NAME)
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
+# Таймауты
+PLAYLIST_TIMEOUT = 20
+STREAM_TIMEOUT = 10
+
+# Проверка базового формата плейлиста
 def is_playlist_valid(lines: list[str]) -> bool:
-    """Проверка базового формата M3U плейлиста"""
     return (
-        bool(lines)
-        and lines[0].strip().lower().startswith("#extm3u")
+        bool(lines) and lines[0].strip().lower().startswith("#extm3u")
         and any(line.strip().lower().startswith("#extinf") for line in lines)
     )
 
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
-    """Загружает M3U-плейлист, проверяет валидность и фильтрует каналы по списку в config.WANTED_CHANNELS."""
+    """Скачивает плейлист, фильтрует по WANTED_CHANNELS и проверяет работу каналов"""
     try:
-        async with session.get(url, timeout=15) as resp:
+        async with session.get(url, timeout=PLAYLIST_TIMEOUT) as resp:
             if resp.status != 200:
                 return None
-
-            content = await resp.text()
-            lines = content.splitlines()
-
-            # Базовая валидация M3U
-            if not is_playlist_valid(lines):
-                return None
-
-            # Фильтрация по имени канала
-            filtered = ["#EXTM3U"]
-            i = 0
-            while i < len(lines):
-                line = lines[i].strip()
-                if line.lower().startswith("#extinf"):
-                    # Извлекаем название после запятой
-                    _, info = line.split(",", 1) if "," in line else ("", line)
-                    # Проверяем, содержит ли имя один из шаблонов из config
-                    if any(key.lower() in info.lower() for key in config.WANTED_CHANNELS):
-                        filtered.append(lines[i])
-                        if i + 1 < len(lines):
-                            filtered.append(lines[i+1])
-                    i += 2
-                else:
-                    i += 1
-
-            # Если после фильтрации нет каналов — возвращаем None
-            if len(filtered) <= 1:
-                return None
-
-            new_content = "\n".join(filtered)
-            # Составляем понятное имя файла
-            parts = url.rstrip("/").split("/")
-            folder = parts[-2] if len(parts) >= 2 else ""
-            base = parts[-1].split("?")[0]
-            playlist_name = f"{folder}_{base}" if folder else base
-
-            return playlist_name, new_content
-
+            text = await resp.text()
     except Exception as e:
-        logger.error(f"Ошибка обработки {url}: {e}")
+        logger.warning(f"Не удалось скачать плейлист {url}: {e}")
         return None
+
+    lines = text.splitlines()
+    if not is_playlist_valid(lines):
+        return None
+
+    # Фильтрация по названиям каналов
+    entries: list[tuple[str,str]] = []  # (info_line, stream_url)
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("#extinf"):
+            title = line.split(",",1)[-1].strip()
+            if any(key.lower() in title.lower() for key in config.WANTED_CHANNELS):
+                if i+1 < len(lines) and lines[i+1].startswith(("http://","https://")):
+                    entries.append((line, lines[i+1]))
+
+    if not entries:
+        return None
+
+    # Проверяем доступность хотя бы одного потока
+    for info_line, stream_url in entries:
+        try:
+            async with session.get(stream_url, timeout=STREAM_TIMEOUT) as r:
+                if r.status == 200:
+                    chunk = await r.content.read(512)
+                    if chunk:
+                        # Собираем новый плейлист
+                        filtered_lines = ["#EXTM3U"]
+                        for inf, url2 in entries:
+                            filtered_lines.append(inf)
+                            filtered_lines.append(url2)
+                        content = "\n".join(filtered_lines)
+                        # Имя файла по URL
+                        parts = url.rstrip('/').split('/')
+                        folder = parts[-2] if len(parts) >= 2 else ''
+                        base = parts[-1].split('?')[0]
+                        filename = f"{folder}_{base}" if folder else base
+                        return filename, content
+        except Exception:
+            continue
+
+    return None
 
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "Привет! Я могу проверить M3U плейлист на валидность формата и вернуть отфильтрованные каналы."
-        "Используй команду /playlist — и я пришлю только те каналы, которые есть в моём списке."
+        "Привет! Я собираю рабочие M3U-плейлисты с каналами из вашей подписки.\n"
+        "Используйте /playlist, чтобы получить готовые файлы."
     )
 
 @dp.message(Command("playlist"))
 async def get_playlists(message: types.Message):
-    await message.answer("⏳ Проверяю плейлисты...")
-
-    # Получаем URL из Google Sheets
-    urls = sheet.col_values(2)[1:]
-    urls = [u.strip() for u in urls if u.strip().startswith(('http://','https://'))]
+    await message.answer("⏳ Идёт обработка плейлистов...")
+    urls = [u.strip() for u in sheet.col_values(2)[1:] if u.strip().startswith(("http://","https://"))]
+    valid: list[tuple[str,str]] = []
 
     async with aiohttp.ClientSession() as session:
-        tasks = [process_playlist(url, session) for url in urls]
+        tasks = [process_playlist(u, session) for u in urls]
         results = await asyncio.gather(*tasks)
-        valid_playlists = [res for res in results if res]
+        valid = [r for r in results if r]
 
-    if not valid_playlists:
-        return await message.answer("❌ Не найдено подходящих каналов в плейлистах.")
+    if not valid:
+        return await message.answer("❌ Не найдено рабочих плейлистов с нужными каналами.")
 
-    for name, content in valid_playlists:
-        file = BufferedInputFile(content.encode('utf-8'), filename=name)
-        await message.answer_document(file, caption=f"✅ {name}")
+    for filename, content in valid:
+        file = BufferedInputFile(content.encode('utf-8'), filename=filename)
+        await message.answer_document(file, caption=f"✅ {filename}")
         await asyncio.sleep(1)
+
+    await message.answer(f"🎉 Готово! Отправлено {len(valid)}/{len(urls)} плейлистов.")
 
 # Health-check и запуск сервиса
 async def health_check(request):
@@ -131,10 +136,9 @@ async def main():
     web_app = await start_web_app()
     runner = web.AppRunner(web_app)
     await runner.setup()
-    port = int(os.environ.get('PORT', 5000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    port = int(os.environ.get("PORT", 5000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
