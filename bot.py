@@ -62,7 +62,9 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             while i < len(lines):
                 line = lines[i].strip()
                 if line.lower().startswith("#extinf"):
+                    # Извлекаем название после запятой
                     _, info = line.split(",", 1) if "," in line else ("", line)
+                    # Проверяем, содержит ли имя один из шаблонов из config
                     if any(key.lower() in info.lower() for key in config.CHANNEL_NAMES):
                         filtered.append(lines[i])
                         if i + 1 < len(lines):
@@ -71,18 +73,18 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                 else:
                     i += 1
 
+            # Если после фильтрации нет каналов — возвращаем None
             if len(filtered) <= 1:
                 return None
 
-            content_filtered = "\n".join(filtered)
-
-            # Составляем имя файла
+            new_content = "\n".join(filtered)
+            # Составляем понятное имя файла
             parts = url.rstrip("/").split("/")
             folder = parts[-2] if len(parts) >= 2 else ""
             base = parts[-1].split("?")[0]
             playlist_name = f"{folder}_{base}" if folder else base
 
-            return playlist_name, content_filtered
+            return playlist_name, new_content
 
     except Exception as e:
         logger.error(f"Ошибка обработки {url}: {e}")
@@ -91,7 +93,8 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "Привет! Я могу проверить M3U плейлист на валидность формата и вернуть отфильтрованные каналы.\n"
+        "Привет! Я могу проверить M3U плейлист на валидность формата и вернуть отфильтрованные каналы.
+"
         "Используй команду /playlist — и я пришлю только те каналы, которые есть в моём списке."
     )
 
@@ -99,6 +102,7 @@ async def start_command(message: types.Message):
 async def get_playlists(message: types.Message):
     await message.answer("⏳ Проверяю плейлисты...")
 
+    # Получаем URL из Google Sheets
     urls = sheet.col_values(2)[1:]
     urls = [u.strip() for u in urls if u.strip().startswith(('http://','https://'))]
 
@@ -115,7 +119,7 @@ async def get_playlists(message: types.Message):
         await message.answer_document(file, caption=f"✅ {name}")
         await asyncio.sleep(1)
 
-# Health-check
+# Health-check и запуск сервиса
 async def health_check(request):
     return web.Response(text="Bot is alive!")
 
