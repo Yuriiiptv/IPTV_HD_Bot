@@ -43,7 +43,7 @@ def is_playlist_valid(lines: list[str]) -> bool:
     )
 
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
-    """Загружает M3U-плейлист, проверяет валидность и фильтрует каналы по списку в config.CHANNEL_NAMES."""
+    """Загружает M3U-плейлист, проверяет валидность и фильтрует каналы по списку в config.WANTED_CHANNELS."""
     try:
         async with session.get(url, timeout=15) as resp:
             if resp.status != 200:
@@ -65,7 +65,7 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                     # Извлекаем название после запятой
                     _, info = line.split(",", 1) if "," in line else ("", line)
                     # Проверяем, содержит ли имя один из шаблонов из config
-                    if any(key.lower() in info.lower() for key in config.CHANNEL_NAMES):
+                    if any(key.lower() in info.lower() for key in config.WANTED_CHANNELS):
                         filtered.append(lines[i])
                         if i + 1 < len(lines):
                             filtered.append(lines[i+1])
