@@ -34,13 +34,12 @@ sheet = gc.open(config.SHEET_NAME).worksheet(config.SHEET_TAB_NAME)
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
-# === Новое: in-memory хранилище плейлистов и базовый URL ===
+# In-memory хранилище плейлистов и базовый URL
 playlist_store: dict[str, str] = {}
-BASE_URL = os.environ.get("RENDER_EXTERNAL_URL",
-                         os.environ.get("BASE_URL", "https://your-app.com"))
+BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("BASE_URL", "https://your-app.com"))
 # Сколько потоков проверяем выборочно
 SAMPLE_SIZE = 3
-# ===========================================================
+
 
 def is_playlist_valid(lines: list[str]) -> bool:
     """Проверка базового формата M3U плейлиста"""
@@ -51,7 +50,7 @@ def is_playlist_valid(lines: list[str]) -> bool:
     )
 
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
-    """Загружает M3U, фильтрует по имени и проверяет выборочно SAMPLE_SIZE потоков."""
+    """Загружает M3U, фильтрует по имени и выборочно проверяет SAMPLE_SIZE потоков"""
     try:
         async with session.get(url, timeout=15) as resp:
             if resp.status != 200:
@@ -64,6 +63,7 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             if not is_playlist_valid(lines):
                 return None
 
+            # фильтрация по имени каналов
             filtered = ["#EXTM3U"]
             streams = []
             i = 0
@@ -72,7 +72,6 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                 if line.lower().startswith("#extinf"):
                     _, info = line.split(",", 1) if "," in line else ("", line)
                     stream_url = lines[i+1].strip() if i+1 < len(lines) else ""
-                    # фильтрация по имени
                     if any(key.lower() in info.lower() for key in config.WANTED_CHANNELS):
                         filtered.append(lines[i])
                         filtered.append(lines[i+1])
@@ -81,11 +80,11 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                 else:
                     i += 1
 
-            # нет ни одного подходящего по имени
+            # если нет подходящих по имени
             if not streams:
                 return None
 
-            # выбираем SAMPLE_SIZE потоков для проверки
+            # выборка для проверки
             sample_urls = random.sample(streams, min(SAMPLE_SIZE, len(streams)))
 
             # проверяем HEAD-запросом
@@ -98,17 +97,16 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                 except Exception:
                     pass
 
-            # если хотя бы один из SAMPLE_SIZE не живой — нерабочий
-            if alive_count < len(sample_urls):
+            # если ни один не живой — пропускаем
+            if alive_count == 0:
                 return None
 
-            # формируем имя и возвращаем
+            # собираем контент
             new_content = "\n".join(filtered)
             parts = url.rstrip("/").split("/")
             folder = parts[-2] if len(parts) >= 2 else ""
             base = parts[-1].split("?")[0]
             playlist_name = f"{folder}_{base}" if folder else base
-
             return playlist_name, new_content
 
     except Exception as e:
@@ -118,13 +116,13 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "Привет! Я могу проверить M3U плейлист на валидность формата, отфильтровать по вашим каналам "
-        "и выборочно протестировать 3 потока. Используйте /playlist."
+        "Привет! Я проверяю и фильтрую M3U-плейлисты по вашему списку каналов, "
+        "а затем выборочно тестирую потоки. Используйте /playlist"
     )
 
 @dp.message(Command("playlist"))
 async def get_playlists(message: types.Message):
-    await message.answer("⏳ Проверяю плейлисты...")
+    await message.answer("⏳ Проверяю и фильтрую плейлисты...")
 
     urls = sheet.col_values(2)[1:]
     urls = [u.strip() for u in urls if u.strip().startswith(("http://", "https://"))]
@@ -143,7 +141,7 @@ async def get_playlists(message: types.Message):
         await message.answer(f"✅ Ваш плейлист: {link}")
         await asyncio.sleep(1)
 
-# Health-check и раздача по HTTP
+# Health-check и раздача
 async def health_check(request):
     return web.Response(text="Bot is alive!")
 
