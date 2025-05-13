@@ -34,6 +34,11 @@ sheet = gc.open(config.SHEET_NAME).worksheet(config.SHEET_TAB_NAME)
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
+# === Новое: in-memory хранилище плейлистов и базовый URL ===
+playlist_store: dict[str, str] = {}
+BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("BASE_URL", "https://your-app.com"))
+# ===========================================================
+
 def is_playlist_valid(lines: list[str]) -> bool:
     """Проверка базового формата M3U плейлиста"""
     return (
@@ -62,9 +67,7 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             while i < len(lines):
                 line = lines[i].strip()
                 if line.lower().startswith("#extinf"):
-                    # Извлекаем название после запятой
                     _, info = line.split(",", 1) if "," in line else ("", line)
-                    # Проверяем, содержит ли имя один из шаблонов из config
                     if any(key.lower() in info.lower() for key in config.WANTED_CHANNELS):
                         filtered.append(lines[i])
                         if i + 1 < len(lines):
@@ -73,12 +76,10 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                 else:
                     i += 1
 
-            # Если после фильтрации нет каналов — возвращаем None
             if len(filtered) <= 1:
                 return None
 
             new_content = "\n".join(filtered)
-            # Составляем понятное имя файла
             parts = url.rstrip("/").split("/")
             folder = parts[-2] if len(parts) >= 2 else ""
             base = parts[-1].split("?")[0]
@@ -93,15 +94,14 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "Привет! Я могу проверить M3U плейлист на валидность формата и вернуть отфильтрованные каналы."
-        "Используй команду /playlist — и я пришлю только те каналы, которые есть в моём списке."
+        "Привет! Я могу проверить M3U плейлист на валидность формата и вернуть отфильтррованные каналы.\n"
+        "Используй команду /playlist — и я пришлю ссылки на те плейлисты, которые подходят по списку."
     )
 
 @dp.message(Command("playlist"))
 async def get_playlists(message: types.Message):
     await message.answer("⏳ Проверяю плейлисты...")
 
-    # Получаем URL из Google Sheets
     urls = sheet.col_values(2)[1:]
     urls = [u.strip() for u in urls if u.strip().startswith(('http://','https://'))]
 
@@ -114,17 +114,31 @@ async def get_playlists(message: types.Message):
         return await message.answer("❌ Не найдено подходящих каналов в плейлистах.")
 
     for name, content in valid_playlists:
-        file = BufferedInputFile(content.encode('utf-8'), filename=name)
-        await message.answer_document(file, caption=f"✅ {name}")
+        playlist_store[name] = content
+        link = f"{BASE_URL}/playlist/{name}.m3u"
+        await message.answer(f"✅ Ваш плейлист: {link}")
         await asyncio.sleep(1)
 
-# Health-check и запуск сервиса
+# Health-check и раздача плейлиста по HTTP
 async def health_check(request):
     return web.Response(text="Bot is alive!")
 
+async def serve_playlist(request):
+    name = request.match_info['name']
+    content = playlist_store.get(name)
+    if not content:
+        return web.Response(status=404, text="Not found")
+    return web.Response(
+        text=content,
+        content_type="application/vnd.apple.mpegurl"
+    )
+
 async def start_web_app():
     app = web.Application()
-    app.add_routes([web.get("/", health_check)])
+    app.add_routes([
+        web.get("/", health_check),
+        web.get("/playlist/{name}.m3u", serve_playlist),
+    ])
     return app
 
 async def main():
