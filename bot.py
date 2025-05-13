@@ -23,7 +23,7 @@ scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
 ]
-creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])
+creds_dict = json.loads(os.environ.get("GOOGLE_CREDS_JSON", "{}"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
 
@@ -43,7 +43,7 @@ def is_playlist_valid(lines: list[str]) -> bool:
     )
 
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
-    """Обработка одного плейлиста: если формат верен, возвращаем весь оригинальный контент"""
+    """Загружает M3U-плейлист, проверяет валидность и фильтрует каналы по списку в config.CHANNEL_NAMES."""
     try:
         async with session.get(url, timeout=15) as resp:
             if resp.status != 200:
@@ -52,17 +52,40 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             content = await resp.text()
             lines = content.splitlines()
 
-            # Если базовый формат корректен — возвращаем весь плейлист
-            if is_playlist_valid(lines):
-                # Формируем понятное имя файла по URL
-                parts = url.rstrip('/').split('/')
-                folder = parts[-2] if len(parts) >= 2 else ''
-                base = parts[-1].split('?')[0]
-                playlist_name = f"{folder}_{base}" if folder else base
-                return playlist_name, content
+            # Базовая валидация M3U
+            if not is_playlist_valid(lines):
+                return None
 
-            # Иначе — невалидный
-            return None
+            # Фильтрация по имени канала
+            filtered = ["#EXTM3U"]
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                if line.lower().startswith("#extinf"):
+                    # Извлекаем название после запятой
+                    _, info = line.split(",", 1) if "," in line else ("", line)
+                    # Проверяем, содержит ли имя один из шаблонов из config
+                    if any(key.lower() in info.lower() for key in config.CHANNEL_NAMES):
+                        filtered.append(lines[i])
+                        if i + 1 < len(lines):
+                            filtered.append(lines[i+1])
+                    i += 2
+                else:
+                    i += 1
+
+            # Если после фильтрации нет каналов — возвращаем None
+            if len(filtered) <= 1:
+                return None
+
+            new_content = "
+".join(filtered)
+            # Составляем понятное имя файла
+            parts = url.rstrip("/").split("/")
+            folder = parts[-2] if len(parts) >= 2 else ""
+            base = parts[-1].split("?")[0]
+            playlist_name = f"{folder}_{base}" if folder else base
+
+            return playlist_name, new_content
 
     except Exception as e:
         logger.error(f"Ошибка обработки {url}: {e}")
@@ -71,38 +94,31 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "Привет! Я могу проверить M3U плейлист на валидность формата и вернуть его.\n"
-        "Используй команду /playlist — и я пришлю всё, что прошло валидацию."
+        "Привет! Я могу проверить M3U плейлист на валидность формата и вернуть отфильтрованные каналы.
+"
+        "Используй команду /playlist — и я пришлю только те каналы, которые есть в моём списке."
     )
 
 @dp.message(Command("playlist"))
 async def get_playlists(message: types.Message):
-    try:
-        await message.answer("⏳ Проверяю плейлисты...")
+    await message.answer("⏳ Проверяю плейлисты...")
 
-        urls = sheet.col_values(2)[1:]
-        # Фильтруем только корректные URL
-        urls = [u.strip() for u in urls if u.strip().startswith(('http://','https://'))]
-        async with aiohttp.ClientSession() as session:
-            tasks = [process_playlist(url.strip(), session) for url in urls if url.strip()]
-            results = await asyncio.gather(*tasks)
-            valid_playlists = [res for res in results if res]
+    # Получаем URL из Google Sheets
+    urls = sheet.col_values(2)[1:]
+    urls = [u.strip() for u in urls if u.strip().startswith(('http://','https://'))]
 
-        if not valid_playlists:
-            return await message.answer("❌ Не найдено валидных плейлистов")
+    async with aiohttp.ClientSession() as session:
+        tasks = [process_playlist(url, session) for url in urls]
+        results = await asyncio.gather(*tasks)
+        valid_playlists = [res for res in results if res]
 
-        count = 0
-        for name, content in valid_playlists:
-            file = BufferedInputFile(content.encode('utf-8'), filename=name)
-            await message.answer_document(file, caption=f"✅ {name}")
-            count += 1
-            await asyncio.sleep(1)
+    if not valid_playlists:
+        return await message.answer("❌ Не найдено подходящих каналов в плейлистах.")
 
-        await message.answer(f"🎉 Готово! Отправлено плейлистов: {count}/{len(valid_playlists)}")
-
-    except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
-        await message.answer("⚠️ Внутренняя ошибка. Попробуйте позже.")
+    for name, content in valid_playlists:
+        file = BufferedInputFile(content.encode('utf-8'), filename=name)
+        await message.answer_document(file, caption=f"✅ {name}")
+        await asyncio.sleep(1)
 
 # Health-check и запуск сервиса
 async def health_check(request):
