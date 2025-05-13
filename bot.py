@@ -34,8 +34,8 @@ bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
 # Таймауты
-PLAYLIST_TIMEOUT = 20
-STREAM_TIMEOUT = 10
+PLAYLIST_TIMEOUT = 30
+STREAM_TIMEOUT = 20
 
 # Проверка базового формата плейлиста
 def is_playlist_valid(lines: list[str]) -> bool:
@@ -69,6 +69,21 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                     entries.append((line, lines[i+1]))
 
     if not entries:
+        # Если нет каналов по фильтру, но выдаём рабочий плейлист, проверяем любой поток
+        all_streams = [lines[i+1] for i,line in enumerate(lines)
+                       if line.strip().lower().startswith("#extinf") and i+1 < len(lines)]
+        for s_url in all_streams:
+            try:
+                async with session.get(s_url, timeout=STREAM_TIMEOUT) as r:
+                    if r.status == 200 and await r.content.read(256):
+                        # возвращаем оригинальный плейлист без фильтрации
+                        parts = url.rstrip('/').split('/')
+                        folder = parts[-2] if len(parts) >= 2 else ''
+                        base = parts[-1].split('?')[0]
+                        filename = f"{folder}_{base}" if folder else base
+                        return filename, text
+            except Exception:
+                continue
         return None
 
     # Проверяем доступность хотя бы одного потока
