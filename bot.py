@@ -87,18 +87,22 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             # выборка для проверки
             sample_urls = random.sample(streams, min(SAMPLE_SIZE, len(streams)))
 
-            # проверяем HEAD-запросом
+                        # проверяем GET-запросом и читаем первые байты
             alive_count = 0
             for s_url in sample_urls:
                 try:
-                    async with session.head(s_url, timeout=5) as r:
+                    async with session.get(s_url, timeout=5) as r:
                         if r.status == 200:
-                            alive_count += 1
+                            chunk = await r.content.read(256)
+                            if chunk:
+                                alive_count += 1
+                                break  # достаточно одного живого
                 except Exception:
                     pass
 
-            # если ни один не живой — пропускаем
+            # если ни один поток не живой — пропускаем
             if alive_count == 0:
+                return None
                 return None
 
             # собираем контент
