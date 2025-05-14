@@ -45,70 +45,89 @@ def is_playlist_valid(lines: list[str]) -> bool:
     )
 
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
-    """Скачивает плейлист, фильтрует по WANTED_CHANNELS и проверяет работу каналов"""
     try:
-        async with session.get(url, timeout=PLAYLIST_TIMEOUT) as resp:
+        async with session.get(url, timeout=15) as resp:
             if resp.status != 200:
                 return None
-            text = await resp.text()
+
+            content = await resp.text()
+            lines = content.splitlines()
+
+            if not is_playlist_valid(lines):
+                return None
+
+            filtered = ["#EXTM3U"]
+            streams = []
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                if line.lower().startswith("#extinf"):
+                    _, info = line.split(",", 1) if "," in line else ("", line)
+                    stream_url = lines[i+1].strip() if i+1 < len(lines) else ""
+                    if any(key.lower() in info.lower() for key in config.WANTED_CHANNELS):
+                        filtered.append(line)
+                        filtered.append(stream_url)
+                        streams.append(stream_url)
+                    i += 2
+                else:
+                    i += 1
+
+            # если нашлись нужные каналы — используем их
+            if streams:
+                sample_urls = random.sample(streams, min(SAMPLE_SIZE, len(streams)))
+                alive_count = 0
+                for s_url in sample_urls:
+                    try:
+                        async with session.head(s_url, timeout=5) as r:
+                            if r.status == 200:
+                                alive_count += 1
+                    except:
+                        pass
+
+                if alive_count >= 1:
+                    parts = url.rstrip("/").split("/")
+                    folder = parts[-2] if len(parts) >= 2 else ""
+                    base = parts[-1].split("?")[0]
+                    playlist_name = f"{folder}_{base}" if folder else base
+                    return playlist_name, "\n".join(filtered)
+                else:
+                    return None
+
+            # fallback: нет совпадений, но пробуем проверить хотя бы один поток из оригинала
+            all_streams = []
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                if line.lower().startswith("#extinf"):
+                    stream_url = lines[i+1].strip() if i+1 < len(lines) else ""
+                    all_streams.append(stream_url)
+                    i += 2
+                else:
+                    i += 1
+
+            sample_urls = random.sample(all_streams, min(SAMPLE_SIZE, len(all_streams)))
+            alive_count = 0
+            for s_url in sample_urls:
+                try:
+                    async with session.head(s_url, timeout=5) as r:
+                        if r.status == 200:
+                            alive_count += 1
+                except:
+                    pass
+
+            if alive_count >= 1:
+                parts = url.rstrip("/").split("/")
+                folder = parts[-2] if len(parts) >= 2 else ""
+                base = parts[-1].split("?")[0]
+                playlist_name = f"{folder}_{base}" if folder else base
+                return playlist_name, content
+
+            return None
+
     except Exception as e:
-        logger.warning(f"Не удалось скачать плейлист {url}: {e}")
+        logger.error(f"Ошибка обработки {url}: {e}")
         return None
 
-    lines = text.splitlines()
-    if not is_playlist_valid(lines):
-        return None
-
-    # Фильтрация по названиям каналов
-    entries: list[tuple[str,str]] = []  # (info_line, stream_url)
-    for i, line in enumerate(lines):
-        if line.strip().lower().startswith("#extinf"):
-            title = line.split(",",1)[-1].strip()
-            if any(key.lower() in title.lower() for key in config.WANTED_CHANNELS):
-                if i+1 < len(lines) and lines[i+1].startswith(("http://","https://")):
-                    entries.append((line, lines[i+1]))
-
-    if not entries:
-        # Если нет каналов по фильтру, но выдаём рабочий плейлист, проверяем любой поток
-        all_streams = [lines[i+1] for i,line in enumerate(lines)
-                       if line.strip().lower().startswith("#extinf") and i+1 < len(lines)]
-        for s_url in all_streams:
-            try:
-                async with session.get(s_url, timeout=STREAM_TIMEOUT) as r:
-                    if r.status == 200 and await r.content.read(256):
-                        # возвращаем оригинальный плейлист без фильтрации
-                        parts = url.rstrip('/').split('/')
-                        folder = parts[-2] if len(parts) >= 2 else ''
-                        base = parts[-1].split('?')[0]
-                        filename = f"{folder}_{base}" if folder else base
-                        return filename, text
-            except Exception:
-                continue
-        return None
-
-    # Проверяем доступность хотя бы одного потока
-    for info_line, stream_url in entries:
-        try:
-            async with session.get(stream_url, timeout=STREAM_TIMEOUT) as r:
-                if r.status == 200:
-                    chunk = await r.content.read(512)
-                    if chunk:
-                        # Собираем новый плейлист
-                        filtered_lines = ["#EXTM3U"]
-                        for inf, url2 in entries:
-                            filtered_lines.append(inf)
-                            filtered_lines.append(url2)
-                        content = "\n".join(filtered_lines)
-                        # Имя файла по URL
-                        parts = url.rstrip('/').split('/')
-                        folder = parts[-2] if len(parts) >= 2 else ''
-                        base = parts[-1].split('?')[0]
-                        filename = f"{folder}_{base}" if folder else base
-                        return filename, content
-        except Exception:
-            continue
-
-    return None
 
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
