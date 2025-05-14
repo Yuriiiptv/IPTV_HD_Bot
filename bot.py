@@ -64,7 +64,8 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
                 if line.lower().startswith("#extinf"):
                     _, info = line.split(",", 1) if "," in line else ("", line)
                     stream_url = lines[i+1].strip() if i+1 < len(lines) else ""
-                    if any(key.lower() in info.lower() for key in config.WANTED_CHANNELS):
+                    if any(key.lower() in line.lower() for key in config.WANTED_CHANNELS):
+
                         filtered.append(line)
                         filtered.append(stream_url)
                         streams.append(stream_url)
