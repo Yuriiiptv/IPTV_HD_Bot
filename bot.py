@@ -56,8 +56,9 @@ async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[st
             if any(key.lower() in info.lower() for key in config.WANTED_CHANNELS):
                 filtered.append(info)
                 filtered.append(link)
+
+    # Если нет совпадений — пропускаем плейлист
     if len(filtered) <= 1:
-        # ничего не найдено по ключам — пропускаем
         return None
 
     base = url.rstrip('/').split('/')[-1].split('?')[0] or 'playlist'
@@ -78,7 +79,6 @@ async def cmd_playlist(message: types.Message):
     if not urls:
         return await message.answer("❌ В таблице нет ссылок на плейлисты.")
 
-    results = []
     async with aiohttp.ClientSession() as session:
         tasks = [process_playlist(u, session) for u in urls]
         fetched = await asyncio.gather(*tasks)
@@ -87,7 +87,6 @@ async def cmd_playlist(message: types.Message):
         return await message.answer("❌ Не найдено каналов по заданным ключам.")
 
     for filename, content in results:
-        # сохраняем в память и выдаём ссылку
         playlist_store[filename] = content
         link = f"{BASE_URL}/playlist/{filename}"
         await message.answer(f"✅ Плейлист готов: {link}")
