@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import logging
+import random
 import aiohttp
 
 from aiogram import Bot, Dispatcher, types
@@ -33,102 +34,62 @@ sheet = gc.open(config.SHEET_NAME).worksheet(config.SHEET_TAB_NAME)
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
-# Таймауты
-PLAYLIST_TIMEOUT = 30
-STREAM_TIMEOUT = 20
+# Таймауты и проверки
+PLAYLIST_TIMEOUT = config.PLAYLIST_TIMEOUT if hasattr(config, 'PLAYLIST_TIMEOUT') else 60  # сек
+STREAM_TIMEOUT = config.STREAM_TIMEOUT if hasattr(config, 'STREAM_TIMEOUT') else 10      # сек
+SAMPLE_SIZE = getattr(config, 'SAMPLE_SIZE', 3)
+MIN_ALIVE = getattr(config, 'MIN_ALIVE', 1)
 
 # Проверка базового формата плейлиста
+
 def is_playlist_valid(lines: list[str]) -> bool:
     return (
-        bool(lines) and lines[0].strip().lower().startswith("#extm3u")
+        bool(lines)
+        and lines[0].strip().lower().startswith("#extm3u")
         and any(line.strip().lower().startswith("#extinf") for line in lines)
     )
 
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
     try:
-        async with session.get(url, timeout=15) as resp:
+        # загрузка плейлиста
+        async with session.get(url, timeout=PLAYLIST_TIMEOUT) as resp:
             if resp.status != 200:
+                logger.info(f"{url} вернул статус {resp.status}")
                 return None
-
             content = await resp.text()
-            lines = content.splitlines()
+        lines = content.splitlines()
 
-            if not is_playlist_valid(lines):
-                return None
-
-            filtered = ["#EXTM3U"]
-            streams = []
-            i = 0
-            while i < len(lines):
-                line = lines[i].strip()
-                if line.lower().startswith("#extinf"):
-                    _, info = line.split(",", 1) if "," in line else ("", line)
-                    stream_url = lines[i+1].strip() if i+1 < len(lines) else ""
-                    if any(key.lower() in line.lower() for key in config.WANTED_CHANNELS):
-
-                        filtered.append(line)
-                        filtered.append(stream_url)
-                        streams.append(stream_url)
-                    i += 2
-                else:
-                    i += 1
-
-            # если нашлись нужные каналы — используем их
-            if streams:
-                sample_urls = random.sample(streams, min(SAMPLE_SIZE, len(streams)))
-                alive_count = 0
-                for s_url in sample_urls:
-                    try:
-                        async with session.head(s_url, timeout=5) as r:
-                            if r.status == 200:
-                                alive_count += 1
-                    except:
-                        pass
-
-                if alive_count >= 1:
-                    parts = url.rstrip("/").split("/")
-                    folder = parts[-2] if len(parts) >= 2 else ""
-                    base = parts[-1].split("?")[0]
-                    playlist_name = f"{folder}_{base}" if folder else base
-                    return playlist_name, "\n".join(filtered)
-                else:
-                    return None
-
-            # fallback: нет совпадений, но пробуем проверить хотя бы один поток из оригинала
-            all_streams = []
-            i = 0
-            while i < len(lines):
-                line = lines[i].strip()
-                if line.lower().startswith("#extinf"):
-                    stream_url = lines[i+1].strip() if i+1 < len(lines) else ""
-                    all_streams.append(stream_url)
-                    i += 2
-                else:
-                    i += 1
-
-            sample_urls = random.sample(all_streams, min(SAMPLE_SIZE, len(all_streams)))
-            alive_count = 0
-            for s_url in sample_urls:
-                try:
-                    async with session.head(s_url, timeout=5) as r:
-                        if r.status == 200:
-                            alive_count += 1
-                except:
-                    pass
-
-            if alive_count >= 1:
-                parts = url.rstrip("/").split("/")
-                folder = parts[-2] if len(parts) >= 2 else ""
-                base = parts[-1].split("?")[0]
-                playlist_name = f"{folder}_{base}" if folder else base
-                return playlist_name, content
-
+        # базовая валидация
+        if not is_playlist_valid(lines):
+            logger.info(f"{url} не является корректным M3U")
             return None
+
+        # фильтрация нужных каналов
+        filtered = ["#EXTM3U"]
+        streams = []
+        for i, line in enumerate(lines):
+            if line.lower().startswith("#extinf") and i + 1 < len(lines):
+                info_line = line
+                stream_url = lines[i + 1].strip()
+                if any(key.lower() in info_line.lower() for key in config.WANTED_CHANNELS):
+                    filtered.append(info_line)
+                    filtered.append(stream_url)
+                    streams.append(stream_url)
+
+        # если нашли нужные каналы, сразу возвращаем без дополнительной проверки
+        if streams:
+            name = url.rstrip('/').split('/')[-1].split('?')[0]
+            filename = f"filtered_{name}.m3u"
+            return filename, '\n'.join(filtered)
+
+        # иначе возвращаем оригинальный плейлист
+        name = url.rstrip('/').split('/')[-1].split('?')[0]
+        filename = f"full_{name}.m3u"
+        return filename, content
 
     except Exception as e:
         logger.error(f"Ошибка обработки {url}: {e}")
         return None
-
 
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
@@ -141,8 +102,7 @@ async def start_command(message: types.Message):
 async def get_playlists(message: types.Message):
     await message.answer("⏳ Идёт обработка плейлистов...")
     urls = [u.strip() for u in sheet.col_values(2)[1:] if u.strip().startswith(("http://","https://"))]
-    valid: list[tuple[str,str]] = []
-
+    valid = []
     async with aiohttp.ClientSession() as session:
         tasks = [process_playlist(u, session) for u in urls]
         results = await asyncio.gather(*tasks)
