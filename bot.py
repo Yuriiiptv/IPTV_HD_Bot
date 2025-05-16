@@ -13,11 +13,11 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import config
 
-# Логирование
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === Google Sheets Auth ===
+# Google Sheets аутентификация
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
@@ -26,89 +26,93 @@ creds_dict = json.loads(os.environ.get("GOOGLE_CREDS_JSON", "{}"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 gc = gspread.authorize(creds)
 
-# Открываем нужный лист
+# Открываем лист с URL
 sheet = gc.open(config.SHEET_NAME).worksheet(config.SHEET_TAB_NAME)
 
 # Инициализация бота
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
-def is_playlist_valid(lines: list[str]) -> bool:
-    """Проверка базового формата M3U плейлиста"""
-    return (
-        bool(lines)
-        and lines[0].strip().lower().startswith("#extm3u")
-        and any(line.strip().lower().startswith("#extinf") for line in lines)
-    )
-
 async def process_playlist(url: str, session: aiohttp.ClientSession) -> tuple[str, str] | None:
-    """Скачивает M3U, фильтрует каналы по WANTED_CHANNELS и возвращает новый контент"""
+    """
+    Скачивает M3U по URL, фильтрует каналы по списку ключевых слов из config.WANTED_CHANNELS и
+    возвращает имя файла и содержимое нового плейлиста.
+    """
     try:
-        async with session.get(url, timeout=15) as resp:
+        async with session.get(url, timeout=config.GET_TIMEOUT) as resp:
             if resp.status != 200:
+                logger.warning(f"{url} returned status {resp.status}")
                 return None
-            content = await resp.text()
-        lines = content.splitlines()
-        if not is_playlist_valid(lines):
-            return None
-
-        # Фильтрация каналов
-        filtered = ["#EXTM3U"]
-        for i, line in enumerate(lines):
-            if line.lower().startswith("#extinf") and i + 1 < len(lines):
-                info = line
-                stream_url = lines[i+1]
-                if any(key.lower() in info.lower() for key in config.WANTED_CHANNELS):
-                    filtered.append(info)
-                    filtered.append(stream_url)
-        # Если после фильтрации нет каналов, пропускаем
-        if len(filtered) <= 1:
-            return None
-
-        # Генерация имени файла
-        parts = url.rstrip("/").split("/")
-        folder = parts[-2] if len(parts) >= 2 else ""
-        base = parts[-1].split("?")[0]
-        name = f"filtered_{folder}_{base}" if folder else f"filtered_{base}"
-
-        return name, "\n".join(filtered)
-
+            raw = await resp.text()
     except Exception as e:
-        logger.error(f"Ошибка при обработке {url}: {e}")
+        logger.error(f"Error fetching {url}: {e}")
         return None
 
+    lines = raw.splitlines()
+    # Убедимся, что это M3U
+    if not lines or not lines[0].strip().lower().startswith("#extm3u"):
+        logger.info(f"{url} is not a valid M3U")
+        return None
+
+    # Построим фильтрованный плейлист
+    filtered = ["#EXTM3U"]
+    for i in range(len(lines) - 1):
+        line = lines[i].strip()
+        if line.lower().startswith("#extinf"):
+            info = line
+            link = lines[i+1].strip()
+            # проверяем ключевые слова в info
+            if any(key.lower() in info.lower() for key in config.WANTED_CHANNELS):
+                filtered.append(info)
+                filtered.append(link)
+
+    # Если после фильтрации нет записей, пропускаем
+    if len(filtered) == 1:
+        logger.info(f"No channels matched for {url}")
+        return None
+
+    # Подготавливаем контент с правильными разделителями
+    content = "\n".join(filtered) + "\n"
+
+    # Генерируем имя файла
+    base = url.rstrip('/').split('/')[-1].split('?')[0]
+    filename = f"filtered_{base}.m3u"
+    return filename, content
+
 @dp.message(Command("start"))
-async def start_command(message: types.Message):
+async def cmd_start(message: types.Message):
     await message.answer(
-        "Привет! Я проверю плейлисты из Google Sheets, отфильтрую каналы по списку в config.WANTED_CHANNELS "
-        "и пришлю тебе только те файлы, где есть нужные каналы. Используй /playlist."
+        "Привет! Я собираю M3U-плейлисты из вашей таблицы и отфильтровываю каналы по списку в конфиге.\n"
+        "Команда /playlist — чтобы получить готовые файлы."
     )
 
 @dp.message(Command("playlist"))
-async def get_playlists(message: types.Message):
-    await message.answer("⏳ Получаю и фильтрую плейлисты...")
-    urls = sheet.col_values(2)[1:]
-    urls = [u.strip() for u in urls if u.strip().startswith(("http://","https://"))]
-    if not urls:
-        return await message.answer("❌ В таблице нет ссылок на плейлисты.")
+async def cmd_playlist(message: types.Message):
+    await message.answer("⏳ Загружаю и фильтрую плейлисты...")
 
-    results = []
+    urls = sheet.col_values(2)[1:]
+    urls = [u.strip() for u in urls if u and u.startswith(("http://","https://"))]
+    if not urls:
+        return await message.answer("❌ Нет ссылок в таблице.")
+
+    valid = []
     async with aiohttp.ClientSession() as session:
         tasks = [process_playlist(u, session) for u in urls]
-        fetched = await asyncio.gather(*tasks)
-    results = [r for r in fetched if r]
+        results = await asyncio.gather(*tasks)
+        valid = [r for r in results if r]
 
-    if not results:
+    if not valid:
         return await message.answer("❌ Не найдено каналов по заданным ключам.")
 
-    for name, content in results:
-        file = BufferedInputFile(content.encode('utf-8'), filename=name)
-        await message.answer_document(file, caption=f"✅ {name}")
-        await asyncio.sleep(1)
+    # Отправляем каждый плейлист
+    for filename, content in valid:
+        file = BufferedInputFile(content.encode('utf-8'), filename=filename)
+        await message.answer_document(file, caption=f"✅ {filename}")
+        await asyncio.sleep(0.5)
 
-# Health-check и запуск веб-сервиса
+# Web-сервер для health-check
 async def health_check(request):
-    return web.Response(text="Bot is alive!")
+    return web.Response(text="ok")
 
 async def start_web_app():
     app = web.Application()
@@ -119,10 +123,9 @@ async def main():
     web_app = await start_web_app()
     runner = web.AppRunner(web_app)
     await runner.setup()
-    port = int(os.environ.get('PORT', 5000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    port = int(os.environ.get("PORT", 5000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
